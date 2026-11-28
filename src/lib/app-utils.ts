@@ -54,6 +54,7 @@ export function downloadXls(name: string, rows: Record<string, unknown>[]) {
 export function friendlyError(e: unknown): string {
   const raw = (e as any)?.message ?? String(e ?? "");
   const m = raw.replace(/^Error:\s*/i, "").trim();
+  if (/invitation|invite/i.test(m) && m.length < 320 && !/[{}<>]/.test(m) && !/(function|postgrest|jwt)/i.test(m)) return m;
   if (/invalid login credentials/i.test(m)) return "Email or password is incorrect. Please check and try again.";
   if (/email not confirmed/i.test(m)) return "Please confirm your email from the invitation link first, then sign in.";
   if (/user already registered/i.test(m)) return "This email already has an account.";

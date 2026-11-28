@@ -28,11 +28,43 @@ export const inviteMember = createServerFn({method:'POST'}).middleware([requireS
  const {data:ok}=await context.supabase.rpc('has_role',{_user_id:context.userId,_role:'super_admin'});if(!ok)throw new Error('Only the Super Admin can invite team members');
  const {getRequest}=await import('@tanstack/react-start/server'); const origin=getRequest().headers.get('origin');if(!origin||new URL(data.origin).origin!==origin)throw new Error('Invalid invitation destination');
  const {supabaseAdmin}=await import('@/integrations/supabase/client.server');
- if(data.invitation_id){const {data:old}=await context.supabase.from('user_invitations').select('*').eq('id',data.invitation_id).single();if(!old||old.status!=='pending'||old.email!==data.email)throw new Error('Invitation cannot be resent');}
- const {data:invited,error}=await supabaseAdmin.auth.admin.inviteUserByEmail(data.email,{redirectTo:`${origin}/reset-password`});if(error)throw new Error(error.message);if(!invited.user)throw new Error('Invitation was not created');
- const {error:roleError}=await supabaseAdmin.from('user_roles').upsert({user_id:invited.user.id,role:data.role},{onConflict:'user_id,role'});if(roleError)throw roleError;
- const {error:invitationError}=await supabaseAdmin.from('user_invitations').upsert({...(data.invitation_id?{id:data.invitation_id}:{}),email:data.email,role:data.role,invited_user_id:invited.user.id,invited_by:context.userId,status:'pending',expires_at:new Date(Date.now()+7*86400000).toISOString()});if(invitationError)throw invitationError;
- await supabaseAdmin.from('activity_logs').insert({user_id:context.userId,action:'User invitation sent',entity_id:invited.user.id});return {ok:true};
+ const email=data.email.trim().toLowerCase();
+ if(data.invitation_id){const {data:old}=await context.supabase.from('user_invitations').select('*').eq('id',data.invitation_id).single();if(!old||old.status!=='pending'||old.email.toLowerCase()!==email)throw new Error('This invitation can no longer be resent. Send a fresh invitation instead.');}
+ const redirectTo=`${origin}/reset-password`;
+ const findByEmail=async()=>{for(let page=1;page<=10;page++){const {data:list,error}=await supabaseAdmin.auth.admin.listUsers({page,perPage:200});if(error||!list?.users?.length)return undefined;const hit=list.users.find(u=>(u.email??'').toLowerCase()===email);if(hit)return hit;if(list.users.length<200)return undefined;}return undefined;};
+ const writeRecords=async(userId:string,status:string)=>{
+  const {error:roleError}=await supabaseAdmin.from('user_roles').upsert({user_id:userId,role:data.role},{onConflict:'user_id,role'});if(roleError)throw roleError;
+  const {error:invErr}=await supabaseAdmin.from('user_invitations').upsert({...(data.invitation_id?{id:data.invitation_id}:{}),email,role:data.role,invited_user_id:userId,invited_by:context.userId,status,expires_at:new Date(Date.now()+7*86400000).toISOString()});if(invErr)throw invErr;
+  await supabaseAdmin.from('activity_logs').insert({user_id:context.userId,action:'User invitation sent',entity_id:userId});
+ };
+ // Case 1: an account with this email already exists.
+ const existing=await findByEmail();
+ if(existing){
+  if(existing.email_confirmed_at){ // Active account — just make sure role + records are right; no email needed.
+   await writeRecords(existing.id,'accepted');return {ok:true,mode:'existing' as const,link:null};
+  }
+  // Pending/orphaned invite from an earlier attempt: remove it so a clean invite can be sent (this was the main resend blocker).
+  await supabaseAdmin.auth.admin.deleteUser(existing.id);
+ }
+ // Case 2: fresh invite, with a redirect fallback if this deployment origin is not on the auth allowlist.
+ let invited=await supabaseAdmin.auth.admin.inviteUserByEmail(email,{redirectTo});
+ if(invited.error && /redirect/i.test(invited.error.message)) invited=await supabaseAdmin.auth.admin.inviteUserByEmail(email);
+ if(invited.error || !invited.data?.user){
+  const reason=invited.error?.message??'';
+  // Email channel failed (commonly the built-in email rate limit). If the account was still created, hand the admin a direct link to share.
+  const created=await findByEmail();
+  if(created && !created.email_confirmed_at){
+   try{await writeRecords(created.id,'pending');}catch{/* records retried on next invite */}
+   const {data:linkData}=await supabaseAdmin.auth.admin.generateLink({type:'magiclink',email,options:{redirectTo}});
+   if(linkData?.properties?.action_link) return {ok:true,mode:'link' as const,link:linkData.properties.action_link};
+  }
+  if(/rate limit/i.test(reason)) throw new Error('Email sending limit reached for now. Please wait about an hour and try again, or set up a custom email provider in Lovable Cloud for unlimited invitations.');
+  throw new Error('The invitation email could not be sent. Please try again in a moment.');
+ }
+ const userId=invited.data.user.id;
+ try{ await writeRecords(userId,'pending'); }
+ catch(e){ await supabaseAdmin.auth.admin.deleteUser(userId); throw new Error('The invitation could not be completed. Please try again.'); }
+ return {ok:true,mode:'email' as const,link:null};
 });
 export const changeMember = createServerFn({method:'POST'}).middleware([requireSupabaseAuth]).inputValidator(z.object({user_id:z.uuid(),active:z.boolean(),role:z.enum(['admin','agent','viewer'])})).handler(async({data,context})=>{const {data:ok}=await context.supabase.rpc('has_role',{_user_id:context.userId,_role:'super_admin'});if(!ok)throw new Error('Super Admin access required');const {data:protectedUser}=await context.supabase.from('user_roles').select('id').eq('user_id',data.user_id).eq('role','super_admin');if(protectedUser?.length)throw new Error('The Super Admin cannot be modified');const {supabaseAdmin}=await import('@/integrations/supabase/client.server');const {error}=await supabaseAdmin.from('profiles').update({active:data.active}).eq('id',data.user_id);if(error)throw error;await supabaseAdmin.from('user_roles').delete().eq('user_id',data.user_id);const {error:roleError}=await supabaseAdmin.from('user_roles').insert({user_id:data.user_id,role:data.role});if(roleError)throw roleError;await supabaseAdmin.from('activity_logs').insert({user_id:context.userId,action:'Team permissions updated',entity_id:data.user_id});return {ok:true};});
 export const revokeInvitation = createServerFn({method:'POST'}).middleware([requireSupabaseAuth]).inputValidator(z.object({id:z.uuid()})).handler(async({data,context})=>{const {data:ok}=await context.supabase.rpc('has_role',{_user_id:context.userId,_role:'super_admin'});if(!ok)throw new Error('Super Admin access required');const {data:inv}=await context.supabase.from('user_invitations').select('*').eq('id',data.id).single();if(!inv||inv.status!=='pending')throw new Error('Invitation is not pending');const {supabaseAdmin}=await import('@/integrations/supabase/client.server');if(inv.invited_user_id)await supabaseAdmin.from('profiles').update({active:false}).eq('id',inv.invited_user_id);const {error}=await supabaseAdmin.from('user_invitations').update({status:'revoked'}).eq('id',data.id);if(error)throw error;return {ok:true};});
