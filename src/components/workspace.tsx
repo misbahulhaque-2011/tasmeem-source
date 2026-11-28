@@ -421,12 +421,23 @@ function UsersView({ ws, reload }: Ctx) {
   useEffect(() => { if (canManage(ws.role)) loadTeam(); }, [loadTeam, ws.role]);
   if (!canManage(ws.role)) return <><Heading eyebrow="Team" title="User Management" sub="" /><div className="empty-block"><h3>Administrator access required</h3><p>Only Admins and the Super Admin can view team management.</p></div></>;
   const roleOf = (uid: string) => team?.roles?.find((r: AnyRec) => r.user_id === uid)?.role ?? "—";
-  const invite = async (inv?: AnyRec) => { setBusy(true); try { await inviteMember({ data: { email: inv?.email ?? email, role: (inv?.role ?? role) as any, origin: location.origin, invitation_id: inv?.id ?? null } }); toast.success("Invitation email sent — they set their own password from the secure link."); setEmail(""); loadTeam(); } catch (e: any) { toast.error(friendlyError(e)); } finally { setBusy(false); } };
+  const [shareLink, setShareLink] = useState(""); const [shareEmail, setShareEmail] = useState("");
+  const invite = async (inv?: AnyRec) => { setBusy(true); setShareLink(""); try { const res: AnyRec = await inviteMember({ data: { email: inv?.email ?? email, role: (inv?.role ?? role) as any, origin: location.origin, invitation_id: inv?.id ?? null } });
+    if (res?.mode === "link" && res.link) { setShareLink(res.link); setShareEmail(inv?.email ?? email); toast.success("Email পাঠানো যায়নি, তবে সরাসরি পাঠানোর লিংক তৈরি হয়েছে — নিচে দেখুন।"); }
+    else if (res?.mode === "existing") toast.success("This email already has an active account — role updated, no invitation email needed.");
+    else toast.success("Invitation email sent — they set their own password from the secure link.");
+    setEmail(""); loadTeam(); } catch (e: any) { toast.error(friendlyError(e)); } finally { setBusy(false); } };
   return <><Heading eyebrow="Team" title="User Management" sub="Invite-only. The Super Admin (haquenahian1961@gmail.com) is provisioned securely — nobody gains that role by registering with the email alone." />
     {ws.role === "super_admin" && <div className="report-option" style={{ marginBottom: 22 }}><h2>Invite a team member</h2><p>They receive an email with a secure link, set their own password, and become active. You never create or know their password.</p>
     <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}><input className="field-input" style={{ flex: "1 1 240px" }} type="email" placeholder="teammate@email.com" value={email} onChange={(e) => setEmail(e.target.value)} />
     <Sel className="field-input" style={{ width: 180 }} value={role} onValueChange={setRole}><option value="admin">Admin</option><option value="agent">Sourcing Agent</option><option value="viewer">Viewer</option></Sel>
-    <Button disabled={busy || !email.includes("@")} onClick={() => invite()}>Send Invitation</Button></div></div>}
+    <Button disabled={busy || !email.includes("@")} onClick={() => invite()}>{busy ? "Sending…" : "Send Invitation"}</Button></div>
+    {shareLink && <div style={{ marginTop: 14, border: "1px solid var(--gold)", background: "var(--gold-soft)", borderRadius: 10, padding: 14 }}>
+      <p style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>Direct invite link for {shareEmail}</p>
+      <p style={{ fontSize: 11, color: "var(--muted-foreground)", marginBottom: 10 }}>The email service could not send this one. Copy this secure link and send it to them directly (e.g. WhatsApp) — they will set their own password. The link expires soon, so send it now.</p>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}><input className="field-input" readOnly value={shareLink} style={{ flex: "1 1 260px", fontSize: 11 }} onFocus={(e) => e.target.select()} />
+      <Button size="sm" onClick={async () => { try { await navigator.clipboard.writeText(shareLink); toast.success("Invite link copied"); } catch { toast.error("Copy failed — long-press the link field to copy it manually."); } }}>Copy Link</Button>
+      <Button size="sm" variant="ghost" onClick={() => setShareLink("")}>Dismiss</Button></div></div>}</div>}
     <div className="section-title"><div><h2>Team members</h2></div><Button size="sm" variant="outline" onClick={loadTeam}><RefreshCw size={13} /> Refresh</Button></div>
     <div className="table-wrap"><table className="data-table"><thead><tr><th>Member</th><th>Role</th><th>Active</th><th>Joined</th>{ws.role === "super_admin" && <th>Actions</th>}</tr></thead><tbody>
       {(team?.profiles ?? []).map((p: AnyRec) => <tr key={p.id}><td><b>{p.display_name || p.id.slice(0, 8)}</b></td><td style={{ textTransform: "capitalize" }}>{String(roleOf(p.id)).replace("_", " ")}</td><td>{p.active ? "Yes" : "Deactivated"}</td><td>{fmtDate(p.created_at)}</td>
